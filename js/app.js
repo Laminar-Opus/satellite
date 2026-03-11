@@ -67,6 +67,17 @@ function showMain() {
 
 // --- Bootstrap ---
 
+async function pushSelfKey(token, repo, contentKey) {
+  const pk = crypto.fromBase64(localStorage.getItem('satproto_public_key'));
+  const sealed = crypto.sealContentKey(contentKey, pk);
+  await github.pushTextFile(
+    token,
+    repo,
+    'keys/_self.json',
+    JSON.stringify({ encrypted_key: crypto.toBase64(sealed) })
+  );
+}
+
 async function bootstrap() {
   const { token, repo, domain } = getState();
   const pk = localStorage.getItem('satproto_public_key');
@@ -92,6 +103,7 @@ async function bootstrap() {
   for (const [path, content] of files) {
     await github.pushTextFile(token, repo, path, content);
   }
+  await pushSelfKey(token, repo, contentKey);
   console.log('Site bootstrapped!');
 }
 
@@ -198,6 +210,53 @@ window.saveSetup = async function () {
   } catch (e) {
     setStatus('Initialization failed: ' + e);
   }
+};
+
+window.signIn = async function () {
+  const domain = document.getElementById('domain-input').value.trim();
+  const repo = document.getElementById('repo-input').value.trim();
+  const token = document.getElementById('token-input').value.trim();
+  const sk = document.getElementById('secret-key-input').value.trim();
+  if (!domain || !repo || !token || !sk)
+    return alert('All fields required');
+
+  try {
+    const secretKey = crypto.fromBase64(sk);
+    const publicKey = crypto.derivePublicKey(secretKey);
+
+    // Fetch and decrypt the content key from the site
+    const base = `https://${domain}/${repo.split('/').pop()}`;
+    const resp = await fetch(`${base}/keys/_self.json`);
+    if (!resp.ok) throw new Error('Could not fetch self key — has this site been initialized?');
+    const envelope = await resp.json();
+    const sealed = crypto.fromBase64(envelope.encrypted_key);
+    const contentKey = crypto.openContentKey(sealed, secretKey);
+
+    localStorage.setItem('satproto_domain', domain);
+    localStorage.setItem('satproto_github_repo', repo);
+    auth.storeToken(token);
+    localStorage.setItem('satproto_secret_key', sk);
+    localStorage.setItem('satproto_public_key', crypto.toBase64(publicKey));
+    localStorage.setItem('satproto_content_key', crypto.toBase64(contentKey));
+
+    document.getElementById('public-key-display').textContent =
+      `Public key: ${crypto.toBase64(publicKey)}`;
+    showMain();
+    await refreshFollows();
+    await refreshFeed();
+    setStatus('Signed in!');
+  } catch (e) {
+    alert('Sign in failed: ' + e);
+  }
+};
+
+window.exportKeys = function () {
+  const sk = localStorage.getItem('satproto_secret_key');
+  if (!sk) return alert('No key to export');
+  navigator.clipboard.writeText(sk).then(
+    () => alert('Secret key copied to clipboard. Store it somewhere safe!'),
+    () => prompt('Copy your secret key:', sk)
+  );
 };
 
 window.reinitialize = async function () {
@@ -406,6 +465,8 @@ window.doUnfollow = async function (target) {
       'follows/index.json',
       JSON.stringify(list)
     );
+
+    await pushSelfKey(token, repo, newContentKey);
 
     await refreshFollows();
     await refreshFeed();
