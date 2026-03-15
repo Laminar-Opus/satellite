@@ -57,57 +57,6 @@ function escAttr(s) {
   return (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
 
-// --- Pending post cache (optimistic UI) ---
-
-const PENDING_KEY = 'satproto_pending_posts';
-const PENDING_FOLLOWS_KEY = 'satproto_pending_follows';
-
-function savePendingFollow(target) {
-  const pending = getPendingFollows();
-  if (!pending.includes(target)) pending.push(target);
-  localStorage.setItem(PENDING_FOLLOWS_KEY, JSON.stringify(pending));
-}
-
-function getPendingFollows() {
-  try {
-    return JSON.parse(localStorage.getItem(PENDING_FOLLOWS_KEY) || '[]');
-  } catch {
-    return [];
-  }
-}
-
-function clearSyncedFollows(remoteFollows) {
-  const remoteSet = new Set(remoteFollows);
-  const remaining = getPendingFollows().filter((f) => !remoteSet.has(f));
-  localStorage.setItem(PENDING_FOLLOWS_KEY, JSON.stringify(remaining));
-  return remaining;
-}
-
-function removePendingFollow(target) {
-  const remaining = getPendingFollows().filter((f) => f !== target);
-  localStorage.setItem(PENDING_FOLLOWS_KEY, JSON.stringify(remaining));
-}
-
-function savePendingPost(post) {
-  const pending = getPendingPosts();
-  pending.push({ ...post, _pending: true });
-  localStorage.setItem(PENDING_KEY, JSON.stringify(pending));
-}
-
-function getPendingPosts() {
-  try {
-    return JSON.parse(localStorage.getItem(PENDING_KEY) || '[]');
-  } catch {
-    return [];
-  }
-}
-
-function clearSyncedPosts(remoteIds) {
-  const pending = getPendingPosts();
-  const remaining = pending.filter((p) => !remoteIds.has(p.id));
-  localStorage.setItem(PENDING_KEY, JSON.stringify(remaining));
-  return remaining;
-}
 
 // --- UI ---
 
@@ -158,24 +107,18 @@ async function bootstrap() {
 // --- Actions ---
 
 async function refreshFollows() {
-  const { domain } = getState();
+  const { domain, token, repo } = getState();
   try {
-    const list = await feed.fetchFollowList(domain);
-    const pendingFollows = clearSyncedFollows(list.follows);
+    let list;
+    try { list = await github.fetchFileJson(token, repo, 'follows/index.json'); }
+    catch { list = { follows: [] }; }
     const el = document.getElementById('follows-list');
-    const allFollows = [
-      ...list.follows.map((f) => ({ domain: f, pending: false })),
-      ...pendingFollows.map((f) => ({ domain: f, pending: true })),
-    ];
-    if (allFollows.length === 0) {
+    if (list.follows.length === 0) {
       el.innerHTML = '<span class="follows-empty">Not following anyone yet</span>';
       return;
     }
-    el.innerHTML = allFollows
-      .map(
-        ({ domain: f, pending }) =>
-          `<span class="follow-chip${pending ? ' follow-pending' : ''}">${escHtml(f)}${pending ? ' <span class="post-pending-label">syncing…</span>' : ''} <button onclick="doUnfollow('${escAttr(f)}')" class="unfollow-btn">x</button></span>`
-      )
+    el.innerHTML = list.follows
+      .map((f) => `<span class="follow-chip">${escHtml(f)} <button onclick="doUnfollow('${escAttr(f)}')" class="unfollow-btn">x</button></span>`)
       .join('');
   } catch (e) {
     console.warn('Failed to load follows:', e);
@@ -183,15 +126,16 @@ async function refreshFollows() {
 }
 
 async function refreshFeed() {
-  const { domain } = getState();
+  const { domain, token, repo } = getState();
   setStatus('Loading feed...');
   try {
-    const followList = await feed.fetchFollowList(domain);
+    let followList;
+    try { followList = await github.fetchFileJson(token, repo, 'follows/index.json'); }
+    catch { followList = { follows: [] }; }
     const sk = getSecretKey();
     const postArrays = [];
 
-    const allFollowed = [...new Set([...followList.follows, ...getPendingFollows()])];
-    for (const followed of allFollowed) {
+    for (const followed of followList.follows) {
       try {
         const posts = await feed.fetchUserPosts(
           followed,
@@ -203,21 +147,6 @@ async function refreshFeed() {
       } catch (e) {
         console.warn(`Failed to fetch from ${followed}:`, e);
       }
-    }
-
-    // Clear synced pending posts and merge remaining ones
-    const remoteIds = new Set(postArrays.flat().map((p) => p.id));
-
-    // Also check own remote post index so pending posts authored by self get cleared
-    try {
-      const ownIndex = await feed.fetchPostIndex(domain);
-      for (const id of ownIndex.posts) remoteIds.add(id);
-    } catch {
-      // not yet published, ignore
-    }
-    const pendingPosts = clearSyncedPosts(remoteIds);
-    if (pendingPosts.length > 0) {
-      postArrays.push(pendingPosts);
     }
 
     const merged = feed.mergeFeed(postArrays);
@@ -406,7 +335,6 @@ async function publishPost(post) {
     github.binaryEntry(`posts/${post.id}.json.enc`, encrypted),
     github.textEntry('posts/index.json', JSON.stringify(index)),
   ], post.reply_to ? `reply: ${post.id}` : `new post: ${post.id}`);
-  savePendingPost(post);
   await refreshFeed();
 }
 
@@ -470,7 +398,6 @@ window.doFollow = async function () {
     ], `follow ${target}`);
 
     document.getElementById('follow-domain-input').value = '';
-    savePendingFollow(target);
     await refreshFollows();
     await refreshFeed();
   } catch (e) {
@@ -485,7 +412,6 @@ window.doUnfollow = async function (target) {
   if (!confirm(`Unfollow ${target}? This will re-encrypt all your posts.`))
     return;
 
-  removePendingFollow(target);
   const { domain, token, repo } = getState();
   setStatus(`Unfollowing ${target}...`);
 
