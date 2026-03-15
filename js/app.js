@@ -207,6 +207,14 @@ async function refreshFeed() {
       }
     }
 
+    // Also fetch own posts to detect synced pending posts authored by self
+    try {
+      const ownPosts = await feed.fetchUserPosts(domain, domain, sk, DEFAULT_FEED_LIMIT);
+      postArrays.push(ownPosts);
+    } catch {
+      // not yet published, ignore
+    }
+
     // Clear synced pending posts and merge remaining ones
     const remoteIds = new Set(postArrays.flat().map((p) => p.id));
     const pendingPosts = clearSyncedPosts(remoteIds);
